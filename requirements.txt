@@ -1,0 +1,2 @@
+PyQt6>=6.4.0
+qbittorrent-api>=2023.3.44 

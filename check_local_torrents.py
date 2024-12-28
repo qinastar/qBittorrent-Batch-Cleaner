@@ -3,10 +3,16 @@ import json
 import datetime
 import os
 import sys
+import io
+import codecs
 
 # 设置控制台输出编码为UTF-8
 if sys.platform.startswith('win'):
-    sys.stdout.reconfigure(encoding='utf-8')
+    try:
+        import codecs
+        sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer)
+    except (AttributeError, io.UnsupportedOperation):
+        pass  # 如果无法设置编码，保持默认设置
 
 def format_size(size_bytes):
     """将字节大小转换为人类可读的格式"""
@@ -105,7 +111,7 @@ def check_local_torrents():
                     print(f"{idx}. {torrent['name']} (大小: {format_size(torrent['size'])})")
                     print(f"   标签: {torrent['tags']}")
                     if torrent['category']:
-                        print(f"   分类: {torrent['category']}")
+                        print(f"   ��类: {torrent['category']}")
                 
                 print(f"\n种子列表已保存至: torrents_to_delete.json")
             else:
