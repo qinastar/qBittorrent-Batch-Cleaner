@@ -4,11 +4,12 @@ import os
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QPushButton, QWidget, 
                             QVBoxLayout, QHBoxLayout, QTextEdit, QLabel, 
                             QDialog, QLineEdit, QFormLayout, QMessageBox,
-                            QTabWidget, QScrollArea, QStyleFactory)
+                            QTabWidget, QScrollArea, QStyleFactory, QFrame)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QPalette, QColor, QIcon
 from check_local_torrents import check_local_torrents
 from delete_remote_torrents import delete_remote_torrents
+from check_deleted_torrents import check_deleted_torrents, delete_site_deleted_torrents
 
 DEFAULT_CONFIG = {
     "local_server": {
@@ -230,7 +231,7 @@ class ConfigDialog(QDialog):
 class WorkerThread(QThread):
     output = pyqtSignal(str)
     
-    def __init__(self, function, debug_mode=False):
+    def __init__(self, function, debug_mode=None):
         super().__init__()
         self.function = function
         self.debug_mode = debug_mode
@@ -253,15 +254,66 @@ class WorkerThread(QThread):
         sys.stdout = StreamWrapper(self.output)
         
         try:
-            if self.function == check_local_torrents:
-                self.function()
-            else:
+            if self.debug_mode is not None:
                 self.function(debug_mode=self.debug_mode)
+            else:
+                self.function()
         except Exception as e:
             self.output.emit(f"发生错误: {str(e)}")
         finally:
             # 恢复原始的标准输出
             sys.stdout = old_stdout
+
+    def check_deleted(self):
+        """检查被站点删除的种子"""
+        self.log_output.clear()
+        try:
+            with open("config.json", "r", encoding="utf-8") as f:
+                config = json.load(f)
+            
+            def worker_function():
+                return check_deleted_torrents(config["local_server"])
+            
+            self.worker = WorkerThread(worker_function)
+            self.worker.output.connect(self.append_log)
+            self.worker.start()
+            
+            # 在线程完成时更新文件路径
+            def update_file_path():
+                self.current_deleted_torrents_file = self.worker.function()
+            self.worker.finished.connect(update_file_path)
+            
+        except Exception as e:
+            self.append_log(f"发生错误: {str(e)}")
+
+    def delete_deleted(self):
+        """删除被站点删除的种子"""
+        if not self.current_deleted_torrents_file:
+            QMessageBox.warning(self, "警告", "请先检查站点删除的种子！")
+            return
+            
+        reply = QMessageBox.question(
+            self,
+            "确认删除",
+            "确定要删除这些被站点删除的种子吗？\n这将同时删除种子文件！",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            self.log_output.clear()
+            try:
+                with open("config.json", "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                
+                def worker_function():
+                    delete_site_deleted_torrents(self.current_deleted_torrents_file, config["local_server"])
+                
+                self.worker = WorkerThread(worker_function)
+                self.worker.output.connect(self.append_log)
+                self.worker.start()
+            except Exception as e:
+                self.append_log(f"发生错误: {str(e)}")
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -271,6 +323,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("qBittorrent Batch Cleaner")
         self.setMinimumSize(800, 600)
         self.setup_ui()
+        self.current_deleted_torrents_file = None
 
     def setup_ui(self):
         # 创建中央窗口部件
@@ -282,39 +335,94 @@ class MainWindow(QMainWindow):
         layout.setSpacing(10)
         layout.setContentsMargins(20, 20, 20, 20)
         
-        # 按钮区域
-        button_layout = QHBoxLayout()
-        
         # 设置按钮
         settings_btn = QPushButton("设置")
         settings_btn.setIcon(QIcon.fromTheme("configure"))
         settings_btn.clicked.connect(self.show_settings)
+        layout.addWidget(settings_btn)
         
-        # 检查本地按钮
-        check_local_btn = QPushButton("检查本地种子")
+        # 远程功能区域
+        remote_group = QWidget()
+        remote_layout = QVBoxLayout(remote_group)
+        remote_layout.setSpacing(10)
+        
+        remote_title = QLabel("远程种子管理")
+        remote_title.setStyleSheet("font-size: 14px; font-weight: bold; color: #2a82da; margin-bottom: 5px;")
+        remote_layout.addWidget(remote_title)
+        
+        remote_buttons = QHBoxLayout()
+        
+        # 检查本地种子按钮
+        check_local_btn = QPushButton("检查本地待迁移种子")
+        check_local_btn.setToolTip("检查本地下载器中未下载且带特定标签的种子，这些种子可能在远程下载器中")
         check_local_btn.clicked.connect(self.check_local)
         
-        # 删除远程按钮（调试模式）
+        # 检查远程按钮（调试模式）
         check_remote_btn = QPushButton("检查远程种子")
+        check_remote_btn.setToolTip("在远程下载器中查找对应的种子")
         check_remote_btn.clicked.connect(lambda: self.delete_remote(True))
         
         # 删除远程按钮
         delete_remote_btn = QPushButton("删除远程种子")
+        delete_remote_btn.setToolTip("删除远程下载器中的对应种子，以便本地下载")
         delete_remote_btn.clicked.connect(lambda: self.delete_remote(False))
         
-        button_layout.addWidget(settings_btn)
-        button_layout.addWidget(check_local_btn)
-        button_layout.addWidget(check_remote_btn)
-        button_layout.addWidget(delete_remote_btn)
-        layout.addLayout(button_layout)
+        remote_buttons.addWidget(check_local_btn)
+        remote_buttons.addWidget(check_remote_btn)
+        remote_buttons.addWidget(delete_remote_btn)
+        remote_layout.addLayout(remote_buttons)
+        layout.addWidget(remote_group)
+        
+        # 站点删种功能区域
+        site_group = QWidget()
+        site_layout = QVBoxLayout(site_group)
+        site_layout.setSpacing(10)
+        
+        site_title = QLabel("站点删种功能")
+        site_title.setStyleSheet("font-size: 14px; font-weight: bold; color: #2a82da; margin-bottom: 5px;")
+        site_layout.addWidget(site_title)
+        
+        site_buttons = QHBoxLayout()
+        
+        # 检查站点删除按钮
+        check_deleted_btn = QPushButton("检查站点删除")
+        check_deleted_btn.clicked.connect(self.check_deleted)
+        
+        # 删除站点删除的种子按钮
+        delete_deleted_btn = QPushButton("删除站点删除的种子")
+        delete_deleted_btn.clicked.connect(self.delete_deleted)
+        
+        site_buttons.addWidget(check_deleted_btn)
+        site_buttons.addWidget(delete_deleted_btn)
+        site_layout.addLayout(site_buttons)
+        layout.addWidget(site_group)
+        
+        # 添加分隔线
+        def add_separator():
+            line = QFrame()
+            line.setFrameShape(QFrame.Shape.HLine)
+            line.setFrameShadow(QFrame.Shadow.Sunken)
+            line.setStyleSheet("background-color: #424242;")
+            return line
+        
+        # 在每个分组之间添加分隔线
+        # layout.addWidget(add_separator())
+        layout.addWidget(add_separator())
         
         # 日志输出区域
-        log_label = QLabel("运行日志")
-        layout.addWidget(log_label)
+        log_group = QWidget()
+        log_layout = QVBoxLayout(log_group)
+        log_layout.setSpacing(5)
+        
+        log_title = QLabel("运行日志")
+        log_title.setStyleSheet("font-size: 14px; font-weight: bold; color: #2a82da; margin-bottom: 5px;")
+        log_layout.addWidget(log_title)
         
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
-        layout.addWidget(self.log_output)
+        log_layout.addWidget(self.log_output)
+        
+        layout.addWidget(log_group)
 
     def show_settings(self):
         dialog = ConfigDialog(self)
@@ -338,6 +446,57 @@ class MainWindow(QMainWindow):
         self.worker = WorkerThread(delete_remote_torrents, debug_mode)
         self.worker.output.connect(self.append_log)
         self.worker.start()
+
+    def check_deleted(self):
+        """检查被站点删除的种子"""
+        self.log_output.clear()
+        try:
+            with open("config.json", "r", encoding="utf-8") as f:
+                config = json.load(f)
+            
+            def worker_function():
+                return check_deleted_torrents(config["local_server"])
+            
+            self.worker = WorkerThread(worker_function)
+            self.worker.output.connect(self.append_log)
+            self.worker.start()
+            
+            # 在线程完成时更新文件路径
+            def update_file_path():
+                self.current_deleted_torrents_file = self.worker.function()
+            self.worker.finished.connect(update_file_path)
+            
+        except Exception as e:
+            self.append_log(f"发生错误: {str(e)}")
+
+    def delete_deleted(self):
+        """删除被站点删除的种子"""
+        if not self.current_deleted_torrents_file:
+            QMessageBox.warning(self, "警告", "请先检查站点删除的种子！")
+            return
+            
+        reply = QMessageBox.question(
+            self,
+            "确认删除",
+            "确定要删除这些被站点删除的种子吗？\n这将同时删除种子文件！",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            self.log_output.clear()
+            try:
+                with open("config.json", "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                
+                def worker_function():
+                    delete_site_deleted_torrents(self.current_deleted_torrents_file, config["local_server"])
+                
+                self.worker = WorkerThread(worker_function)
+                self.worker.output.connect(self.append_log)
+                self.worker.start()
+            except Exception as e:
+                self.append_log(f"发生错误: {str(e)}")
 
 def main():
     app = QApplication(sys.argv)
