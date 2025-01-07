@@ -378,9 +378,36 @@ class MainWindow(QMainWindow):
         site_layout = QVBoxLayout(site_group)
         site_layout.setSpacing(10)
         
-        site_title = QLabel("站点删种功能")
+        site_title = QLabel("站点删除功能")
         site_title.setStyleSheet("font-size: 14px; font-weight: bold; color: #2a82da; margin-bottom: 5px;")
         site_layout.addWidget(site_title)
+        
+        # 添加服务器选择框
+        server_selection_layout = QVBoxLayout()
+        server_selection_label = QLabel("选择要执行的服务器:")
+        server_selection_layout.addWidget(server_selection_label)
+        
+        self.server_checkboxes = []
+        try:
+            with open("config.json", "r", encoding="utf-8") as f:
+                config = json.load(f)
+                # 添加本地服务器选项
+                local_checkbox = QPushButton("本地服务器")
+                local_checkbox.setCheckable(True)
+                local_checkbox.setChecked(True)  # 默认选中本地服务器
+                self.server_checkboxes.append({"name": "local", "button": local_checkbox})
+                server_selection_layout.addWidget(local_checkbox)
+                
+                # 添加远程服务器选项
+                for server in config.get("remote_servers", []):
+                    checkbox = QPushButton(server["name"])
+                    checkbox.setCheckable(True)
+                    self.server_checkboxes.append({"name": server["name"], "button": checkbox})
+                    server_selection_layout.addWidget(checkbox)
+        except Exception as e:
+            print(f"加载服务器配置时发生错误: {str(e)}")
+        
+        site_layout.addLayout(server_selection_layout)
         
         site_buttons = QHBoxLayout()
         
@@ -450,12 +477,23 @@ class MainWindow(QMainWindow):
     def check_deleted(self):
         """检查被站点删除的种子"""
         self.log_output.clear()
+        
+        # 获取选中的服务器
+        selected_servers = []
+        for checkbox in self.server_checkboxes:
+            if checkbox["button"].isChecked():
+                selected_servers.append(checkbox["name"])
+        
+        if not selected_servers:
+            QMessageBox.warning(self, "警告", "请至少选择一个服务器！")
+            return
+        
         try:
             with open("config.json", "r", encoding="utf-8") as f:
                 config = json.load(f)
             
             def worker_function():
-                return check_deleted_torrents(config["local_server"])
+                return check_deleted_torrents(config["local_server"], selected_servers, config.get("remote_servers", []))
             
             self.worker = WorkerThread(worker_function)
             self.worker.output.connect(self.append_log)
@@ -474,6 +512,16 @@ class MainWindow(QMainWindow):
         if not self.current_deleted_torrents_file:
             QMessageBox.warning(self, "警告", "请先检查站点删除的种子！")
             return
+        
+        # 获取选中的服务器
+        selected_servers = []
+        for checkbox in self.server_checkboxes:
+            if checkbox["button"].isChecked():
+                selected_servers.append(checkbox["name"])
+        
+        if not selected_servers:
+            QMessageBox.warning(self, "警告", "请至少选择一个服务器！")
+            return
             
         reply = QMessageBox.question(
             self,
@@ -490,7 +538,7 @@ class MainWindow(QMainWindow):
                     config = json.load(f)
                 
                 def worker_function():
-                    delete_site_deleted_torrents(self.current_deleted_torrents_file, config["local_server"])
+                    delete_site_deleted_torrents(self.current_deleted_torrents_file, config["local_server"], selected_servers, config.get("remote_servers", []))
                 
                 self.worker = WorkerThread(worker_function)
                 self.worker.output.connect(self.append_log)
